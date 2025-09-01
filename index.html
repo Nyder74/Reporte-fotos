@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Pickeo - Galería de Fotos (Solo fotos)</title>
+  <style>
+    :root{
+      --bg:#f6f7fb; --card:#fff; --accent:#0f172a; --muted:#6b7280;
+    }
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;margin:0;padding:0;background:var(--bg);color:#111}
+    header{background:var(--accent);color:white;padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    header h1{font-size:1.05rem;margin:0}
+    header .sub{font-size:.9rem;color:#dbeafe}
+    .wrap{display:grid;grid-template-columns:1fr 460px;gap:12px;padding:12px}
+    .card{background:var(--card);border-radius:8px;padding:12px;box-shadow:0 6px 18px rgba(15,23,42,.06)}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center}
+    button,input,select{padding:8px;border-radius:6px;border:1px solid #d1d5db;background:white;cursor:pointer}
+    .small{font-size:.85rem;color:var(--muted)}
+    .muted{color:var(--muted)}
+    .right{justify-self:end}
+    .badge{background:#eef2ff;color:#3730a3;padding:4px 8px;border-radius:999px;font-size:.8rem}
+    video{width:100%;height:auto;border-radius:6px;background:#000}
+    #gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;align-items:start}
+    .thumb{width:100%;height:220px;object-fit:cover;border-radius:8px;border:1px solid #ddd;display:block}
+    .thumb-wrap{position:relative;overflow:hidden;border-radius:8px}
+    .thumb-actions{position:absolute;right:8px;top:8px;display:flex;gap:6px}
+    .thumb-actions button{padding:6px;border-radius:6px;font-size:.85rem;opacity:.95}
+    .meta{font-size:.8rem;color:var(--muted);margin-top:6px}
+    #status{margin-top:8px}
+    .input-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    /* responsive */
+    @media (max-width:1000px){ .wrap{grid-template-columns:1fr} #gallery{grid-template-columns:repeat(2,1fr)} }
+    @media (max-width:600px){ #gallery{grid-template-columns:repeat(1,1fr)} .wrap{padding:8px} }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Pickeo Fotos</h1>
+    <div class="sub">Mejorcito jeje</div>
+  </header>
+
+  <div class="wrap">
+    <!-- LEFT: cámara y controles -->
+    <div class="card">
+      <h2 style="margin:0 0 8px 0">Camarix</h2>
+      <video id="video" autoplay playsinline></video>
+      <canvas id="snap" style="display:none;"></canvas>
+
+      <div class="controls" style="margin-top:10px">
+        <button id="startScan">Iniciar camara</button>
+        <button id="stopScan">Detener</button>
+        <button id="captureManual">Fotox</button>
+        <select id="camSelect" title="Cámara">
+          <option value="environment">Trasera</option>
+          <option value="user">Frontal</option>
+        </select>
+      </div>
+
+      <div style="margin-top:10px" class="input-row">
+        <label class="small">Escanear cooldown (ms): <input id="scanCooldownInput" type="number" value="1500" style="width:120px"></label>
+        <label class="small">Nombre PDF: <input id="pdfNameInput" type="text" value=""></label>
+        <button id="generatePdf" class="right">Generar PDF (fotos grandes)</button>
+      </div>
+
+      <hr />
+
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button id="exportJson">Exportar JSON (backup referencias)</button>
+        <input id="importJsonFile" type="file" accept=".json">
+        <button id="importJsonBtn">Importar JSON</button>
+        <button id="downloadCsv">Descargar CSV simple</button>
+        <button id="downloadImgsZip">Descargar Fotos (zip) — opción</button>
+        <button id="clearAll" style="background:#fee2e2;border-color:#fecaca">Limpiar Todo</button>
+      </div>
+
+      <p class="small muted" id="status">Estado: listo</p>
+    </div>
+
+    <!-- RIGHT: galería -->
+    <div class="card">
+      <h2 style="margin:0 0 8px 0">Galería de Fotos</h2>
+      <div id="gallery" style="max-height:70vh;overflow:auto"></div>
+      <div class="meta small muted" style="margin-top:8px">holipis</div>
+    </div>
+  </div>
+
+  <!-- librerías -->
+  <script src="https://unpkg.com/localforage/dist/localforage.min.js"></script>
+  <script src="https://unpkg.com/quagga@0.12.1/dist/quagga.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
+
+  <script>
+  (function(){
+    // Elementos
+    const video = document.getElementById('video');
+    const snap = document.getElementById('snap');
+    const gallery = document.getElementById('gallery');
+    const statusEl = document.getElementById('status');
+    const pdfNameInput = document.getElementById('pdfNameInput');
+    const camSelect = document.getElementById('camSelect');
+
+    // Almacenamiento
+    localforage.config({name:'pickeo_fotos', storeName:'fotos'});
+    let fotos = JSON.parse(localStorage.getItem('fotosTemporal')) || []; // array de keys (most recent first)
+
+    // Opciones
+    let scanCooldown = parseInt(document.getElementById('scanCooldownInput').value) || 1500;
+    let lastScanTime = 0;
+    let scanning = false;
+    let facingMode = camSelect.value || 'environment';
+
+    // Default pdf name
+    const today = new Date();
+    pdfNameInput.value = `reporte_fotos_${today.toISOString().slice(0,10)}`;
+
+    // Util
+    function status(txt){ statusEl.textContent = 'Estado: ' + txt; }
+    function downloadBlob(filename, blob){ const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url); }
+
+    async function savePhoto(key, dataURL){
+      try { await localforage.setItem(key, dataURL); } catch(e){ console.error('savePhoto err', e); }
+    }
+    async function getPhoto(key){ return await localforage.getItem(key); }
+    async function removePhoto(key){ try { await localforage.removeItem(key); } catch(e){ console.warn('remove', e); } }
+
+    function persistRefs(){ localStorage.setItem('fotosTemporal', JSON.stringify(fotos)); status('Guardado local'); }
+
+    // UI: render gallery grid
+    function renderGallery(){
+      gallery.innerHTML = '';
+      if(!fotos || fotos.length === 0){
+        gallery.innerHTML = '<div class="small muted">Sin fotos aún. Usa "Iniciar Cámara" y captura o presiona Captura Manual.</div>';
+        return;
+      }
+      fotos.forEach(key=>{
+        const wrap = document.createElement('div');
+        wrap.className = 'thumb-wrap';
+        wrap.style.position = 'relative';
+        wrap.innerHTML = `
+          <img class="thumb" data-thumb="${key}" alt="foto" />
+          <div class="thumb-actions">
+            <button data-key="${key}" class="btn-open">Abrir</button>
+            <button data-key="${key}" class="btn-del">Eliminar</button>
+          </div>
+        `;
+        gallery.appendChild(wrap);
+      });
+
+      // cargar imágenes
+      document.querySelectorAll('img[data-thumb]').forEach(async img=>{
+        const key = img.getAttribute('data-thumb');
+        const data = await getPhoto(key);
+        if(data) img.src = data;
+        img.onclick = ()=> window.open(data || '', '_blank');
+      });
+
+      // botones
+      document.querySelectorAll('.btn-del').forEach(b=>{
+        b.onclick = async (e)=>{
+          const k = e.target.dataset.key;
+          if(!confirm('Eliminar foto?')) return;
+          fotos = fotos.filter(x=>x!==k);
+          await removePhoto(k);
+          persistRefs();
+          renderGallery();
+        }
+      });
+      document.querySelectorAll('.btn-open').forEach(b=>{
+        b.onclick = async (e)=>{
+          const k = e.target.dataset.key;
+          const data = await getPhoto(k);
+          const w = window.open('');
+          w.document.write(`<title>Foto</title><img src="${data}" style="max-width:100%"/>`);
+        }
+      });
+    }
+
+    // Camera helpers
+    async function startCamera(){
+      facingMode = camSelect.value || facingMode;
+      try {
+        const constraints = { video: { facingMode } };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        video.srcObject = stream;
+        status('Cámara iniciada');
+      } catch(err){ console.error(err); status('Error cámara: ' + (err.message || err)); }
+    }
+    function stopCamera(){
+      if(video.srcObject){
+        video.srcObject.getTracks().forEach(t=>t.stop());
+        video.srcObject = null;
+      }
+      // stop quagga if running
+      try { Quagga.stop(); } catch(e){}
+      scanning = false;
+      status('Cámara detenida');
+    }
+
+    function captureSnapshot(){
+      const w = video.videoWidth, h = video.videoHeight;
+      if(!w || !h) return null;
+      snap.width = w; snap.height = h;
+      const ctx = snap.getContext('2d');
+      ctx.drawImage(video, 0, 0, w, h);
+      return snap.toDataURL('image/jpeg', 0.85);
+    }
+
+    // Guarda foto y referencia
+    async function storeCaptured(dataURL, tag='manual'){
+      const key = `foto_${tag}_${Date.now()}`;
+      await savePhoto(key, dataURL);
+      fotos.unshift(key);
+      // mantener un límite opcional (ej: 200 fotos) -> si quieres activa esto
+      // if(fotos.length>500){ const removed = fotos.splice(500); removed.forEach(k=>removePhoto(k)); }
+      persistRefs();
+      renderGallery();
+    }
+
+    // Captura manual
+    async function captureManual(){
+      // si la cámara no está activa, intenta iniciar una previa para capturar
+      if(!video || !video.srcObject) {
+        // solicitar permiso y snapshot rápido
+        try {
+          await startCamera();
+          await new Promise(r=>setTimeout(r,600)); // breve espera para que arranque (no exageres)
+        } catch(e){}
+      }
+      const data = captureSnapshot();
+      if(!data) return alert('No se pudo capturar (espera a que la cámara inicie)');
+      await storeCaptured(data, 'manual');
+      status('Foto tomada (manual)');
+    }
+
+    // Quagga scanning: solo para detección automática -> tomar foto sin pedir nada
+    function iniciarQuagga(){
+      if(scanning) return;
+      scanning = true;
+      facingMode = camSelect.value || facingMode;
+      Quagga.init({
+        inputStream: {
+          name: "Live",
+          type: "LiveStream",
+          target: video,
+          constraints: { facingMode }
+        },
+        decoder: {
+          readers: ["ean_reader","ean_8_reader","upc_reader","upc_e_reader","code_128_reader","code_39_reader"]
+        },
+        locate: true,
+        numOfWorkers: navigator.hardwareConcurrency ? Math.max(1, navigator.hardwareConcurrency-1) : 2
+      }, function(err){
+        if(err){ console.error(err); status('Quagga init error: ' + (err.message||err)); scanning = false; return; }
+        Quagga.start();
+        status('Escaneo activo (detectará códigos y tomará foto automáticamente)');
+      });
+
+      Quagga.onDetected(async result=>{
+        const now = Date.now();
+        if(now - lastScanTime < scanCooldown) return;
+        lastScanTime = now;
+        // cuando detecta, tomar snapshot y guardar (sin preguntar)
+        const data = captureSnapshot();
+        if(data){
+          await storeCaptured(data, 'detect');
+          status('Foto tomada (detect)');
+        }
+      });
+    }
+
+    // PDF generator (fotos grandes)
+    async function generarPDF(){
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF('p','mm','a4');
+      const title = pdfNameInput.value.trim() || `reporte_${new Date().toISOString()}`;
+      doc.setFontSize(14);
+      doc.text(title, 12, 16);
+      doc.setFontSize(10);
+      doc.text('Fecha: ' + new Date().toLocaleString(), 12, 22);
+
+      let y = 30;
+      for(const key of fotos){
+        const data = await getPhoto(key);
+        if(!data) continue;
+        // cada foto ocupa gran parte: ancho 180mm, alto proporcional (limitado)
+        if(y + 110 > 280) { doc.addPage(); y = 20; }
+        try {
+          doc.addImage(data, 'JPEG', 15, y, 180, 100); // ancho 180mm x alto 100mm
+        } catch(e){
+          console.warn('addImage error', e);
+        }
+        y += 110;
+      }
+      const fileName = (title.endsWith('.pdf')) ? title : (title + '.pdf');
+      doc.save(fileName);
+      status('PDF generado');
+    }
+
+    // Export JSON (solo referencias - no incluye dataURLs pesadas)
+    document.getElementById('exportJson').onclick = ()=>{
+      const data = { fotosRefs: fotos, exportedAt: new Date().toISOString() };
+      const blob = new Blob([JSON.stringify(data,null,2)], {type:'application/json'});
+      downloadBlob(`backup_fotos_refs_${new Date().toISOString().slice(0,10)}.json`, blob);
+    };
+    // Import JSON
+    document.getElementById('importJsonBtn').onclick = async ()=>{
+      const f = document.getElementById('importJsonFile').files[0];
+      if(!f) return alert('Selecciona un archivo JSON');
+      const txt = await f.text();
+      try {
+        const obj = JSON.parse(txt);
+        if(obj.fotosRefs && Array.isArray(obj.fotosRefs)){
+          // agregar referencias importadas al inicio (no importa si las fotos no existen en IndexedDB)
+          fotos = obj.fotosRefs.concat(fotos);
+          persistRefs();
+          renderGallery();
+          alert('Referencias importadas. Nota: si no incluiste las dataURLs en el JSON, las fotos deben estar en IndexedDB para verse.');
+        } else alert('JSON no contiene fotosRefs');
+      } catch(e){ alert('JSON inválido'); }
+    };
+
+    // CSV simple (lista de keys)
+    document.getElementById('downloadCsv').onclick = ()=>{
+      const lines = [['key','timestamp']];
+      fotos.forEach(k=>{
+        const ts = k.split('_').pop() || '';
+        lines.push([k, ts]);
+      });
+      const csv = lines.map(r=>r.join(',')).join('\n');
+      downloadBlob(`fotos_list_${new Date().toISOString().slice(0,10)}.csv`, new Blob([csv],{type:'text/csv'}));
+    };
+
+    // placeholder zip -> sugerencia: integrar JSZip si quieres zip real
+    document.getElementById('downloadImgsZip').onclick = ()=> alert('Para descargar fotos como zip puedo agregar JSZip; quieres que lo incluya ahora?');
+
+    // Limpiar todo
+    document.getElementById('clearAll').onclick = async ()=>{
+      if(!confirm('Borrar todas las fotos y referencias? (esto eliminará las dataURLs en IndexedDB)')) return;
+      // eliminar todas las keys en IndexedDB
+      for(const k of fotos){
+        try{ await removePhoto(k); }catch(e){}
+      }
+      fotos = [];
+      localStorage.removeItem('fotosTemporal');
+      renderGallery();
+      status('Todo borrado');
+    };
+
+    // botones UI
+    document.getElementById('startScan').onclick = async ()=>{
+      await startCamera();
+      iniciarQuagga();
+    };
+    document.getElementById('stopScan').onclick = ()=> stopCamera();
+    document.getElementById('captureManual').onclick = ()=> captureManual();
+    document.getElementById('generatePdf').onclick = ()=> generarPDF();
+
+    // cooldown input change
+    document.getElementById('scanCooldownInput').onchange = (e)=> {
+      scanCooldown = parseInt(e.target.value) || 1500;
+    };
+
+    // beforeunload: prevenir cierre si hay fotos
+    window.addEventListener('beforeunload', function (e) {
+      if(fotos && fotos.length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    });
+
+    // init
+    (function init(){
+      renderGallery();
+      status('Listo. Inicia la cámara para escaneo automático o usa Captura Manual.');
+    })();
+
+    // Exponer para depuración
+    window._pickeo = { fotos, persistRefs, getPhoto, savePhoto, removePhoto };
+  })();
+  </script>
+</body>
+</html>
